@@ -1,24 +1,32 @@
-import os
+"""
+Quick smoke test — CrewAI + Gemini + NeatLogs.
+
+Mirrors the pattern in meeting-action-agent (src/telemetry.py + crew.py):
+  - `load_dotenv()` first.
+  - `observability.trace_utils.init()` runs BEFORE importing crewai so the
+    instrumentors land on the client libraries before they're loaded.
+  - The crew run is wrapped in a WORKFLOW span via `@neatlogs.span(...)`.
+  - `neatlogs.flush()` at exit.
+"""
+
 from dotenv import load_dotenv
 load_dotenv()
 
-import neatlogs
+from observability.trace_utils import init as _telemetry_init, flush as _telemetry_flush
 
-tracker = neatlogs.init(
-    api_key=os.environ["NEATLOGS_API_KEY"],
-    endpoint=os.environ["NEATLOGS_ENDPOINT"],
-    workflow_name="quick-test",
-    instrumentations=["google-genai", "crewai"],
-    tags=["quick-test"],
-)
+_TRACING = _telemetry_init(tags=["quick-test"])
 
-from crewai import Agent, Task, Crew, Process
-from crewai.tools import tool
+# Safe to import CrewAI now.
+import neatlogs  # noqa: E402
+from crewai import Agent, Task, Crew, Process  # noqa: E402
+from crewai.tools import tool  # noqa: E402
+
 
 @tool("get_weather")
 def get_weather(city: str) -> str:
     """Get the weather for a city."""
     return f"Sunny, 28C in {city}."
+
 
 agent = Agent(
     role="Travel Advisor",
@@ -37,12 +45,18 @@ task = Task(
 )
 
 crew = Crew(agents=[agent], tasks=[task], process=Process.sequential, verbose=True)
-result = crew.kickoff()
 
-print("\nResult:", result)
 
-print("\nFlushing spans...")
-if tracker:
-    for t in tracker._threads:
-        t.join(timeout=8)
-print("Done — check", os.environ["NEATLOGS_ENDPOINT"])
+@neatlogs.span(kind="WORKFLOW", name="quick-test.run")
+def run_crew():
+    return crew.kickoff()
+
+
+if __name__ == "__main__":
+    try:
+        result = run_crew()
+        print("\nResult:", result)
+    finally:
+        print("\nFlushing spans...")
+        _telemetry_flush()
+        print("Done.")

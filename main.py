@@ -16,10 +16,19 @@ Architecture:
 """
 
 import sys
-import json
-from config import NEATLOGS_API_KEY, NEATLOGS_BASE_URL, GEMINI_API_KEY
-from observability.trace_utils import init_neatlogs
-from crew.travel_crew import TravelConcierge
+
+# Neatlogs must init before any LLM / CrewAI imports so auto-instrumentation
+# patches land on the client libraries before they're loaded.
+from dotenv import load_dotenv
+load_dotenv()
+
+from observability.trace_utils import init as _telemetry_init, flush as _telemetry_flush
+_TRACING = _telemetry_init()
+
+# Safe to import CrewAI now.
+from config import NEATLOGS_BASE_URL, GEMINI_API_KEY  # noqa: E402
+from crew.travel_crew import TravelConcierge  # noqa: E402
+import neatlogs  # noqa: E402
 
 BALI_TRIP_REQUEST = {
     "raw_request": (
@@ -47,6 +56,12 @@ BALI_TRIP_REQUEST = {
 }
 
 
+@neatlogs.span(kind="WORKFLOW", name="travel-concierge.main")
+def _run_pipeline(trip_request: dict) -> str:
+    concierge = TravelConcierge()
+    return concierge.run(trip_request)
+
+
 def main():
     print("\n" + "🌴 " * 20)
     print("  TRAVEL CONCIERGE — AI Orchestration Demo")
@@ -57,15 +72,10 @@ def main():
         print("❌ ERROR: GEMINI_API_KEY not set. Check your .env file.")
         sys.exit(1)
 
-    if not NEATLOGS_API_KEY:
-        print("⚠️  WARNING: NEATLOGS_API_KEY not set — traces will be logged locally only.")
-
-    print("🔌  Initializing NeatLogs observability...")
-    init_neatlogs(
-        api_key=NEATLOGS_API_KEY or "",
-        base_url=NEATLOGS_BASE_URL,
-        project_name="travel-concierge-demo",
-    )
+    if not _TRACING:
+        print("⚠️  NEATLOGS_API_KEY / NEATLOGS_ENDPOINT not set — traces will not be exported.")
+    else:
+        print("🔌  NeatLogs observability active.")
 
     print("\n📋  Trip Request:")
     print(f"  Destination  : {BALI_TRIP_REQUEST['destination']}")
@@ -74,14 +84,17 @@ def main():
     print(f"  Budget       : ${BALI_TRIP_REQUEST['total_budget_usd']:,}")
     print(f"  Vibe         : {', '.join(BALI_TRIP_REQUEST['vibe_keywords'])}")
 
-    concierge = TravelConcierge()
-    result = concierge.run(BALI_TRIP_REQUEST)
+    try:
+        result = _run_pipeline(BALI_TRIP_REQUEST)
 
-    print("\n" + "="*70)
-    print("  📄  FINAL TRAVEL BRIEF")
-    print("="*70)
-    print(result[:3000] + ("..." if len(result) > 3000 else ""))
-    print("\n  🔗  View full traces at: " + NEATLOGS_BASE_URL)
+        print("\n" + "=" * 70)
+        print("  📄  FINAL TRAVEL BRIEF")
+        print("=" * 70)
+        print(result[:3000] + ("..." if len(result) > 3000 else ""))
+        if NEATLOGS_BASE_URL:
+            print("\n  🔗  View full traces at: " + NEATLOGS_BASE_URL)
+    finally:
+        _telemetry_flush()
 
 
 if __name__ == "__main__":

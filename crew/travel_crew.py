@@ -1,10 +1,14 @@
 """
 Travel Concierge CrewAI Crew — orchestration, tasks, and execution.
+
+Tracing: the top-level WORKFLOW span is created by `main.py` / `_run_pipeline`.
+Every CrewAI agent execution, LLM call, and @tool invocation is auto-captured
+by the neatlogs CrewAI instrumentor, so this module only needs to log static
+demo artifacts (tables, image URLs, hard-coded detections) as structured
+`neatlogs.log(...)` events on the active WORKFLOW span.
 """
 
 import json
-import time
-from datetime import datetime
 from crewai import Crew, Task, Process
 
 from agents.orchestrator_agent import create_orchestrator_agent
@@ -16,128 +20,83 @@ from agents.budget_agent import create_budget_agent
 from agents.trust_agent import create_trust_agent
 
 from memory.shared_memory import SharedMemory
-from observability.trace_utils import (
-    agent_trace,
-    log_tool_span,
-    log_image_artifact,
-    log_table_artifact,
-    log_url_artifact,
-    log_markdown_artifact,
-    log_detection,
-    log_reasoning_step,
-    log_memory_update,
-    log_orchestration_decision,
-)
 
 
-class TravelConciergeCallbacks:
-    """CrewAI-compatible callback hooks that emit rich NeatLogs traces."""
-
-    def __init__(self, memory: SharedMemory):
-        self.memory = memory
-        self._agent_start_times: dict[str, float] = {}
-
-    def on_crew_start(self, crew_name: str, inputs: dict) -> None:
-        log_orchestration_decision(
-            decision="Crew initialized",
-            rationale=f"Processing travel request for: {inputs.get('destination', 'Bali')}",
-            next_agents=["FlightAgent", "HotelScout", "LocalVibes", "ItineraryBuilder", "BudgetAgent", "TrustAgent"],
-        )
-
-    def on_agent_start(self, agent_role: str, task_description: str) -> None:
-        self._agent_start_times[agent_role] = time.time()
-        log_reasoning_step(
-            agent_name=agent_role,
-            step="task_start",
-            thought=f"Beginning task: {task_description[:150]}",
-        )
-
-    def on_agent_finish(self, agent_role: str, output: str) -> None:
-        duration = int((time.time() - self._agent_start_times.get(agent_role, time.time())) * 1000)
-        log_agent_complete(
-            agent_name=agent_role,
-            task_name="task_complete",
-            output_summary=output[:300] if output else "No output",
-            reasoning="Agent completed assigned task successfully",
-            duration_ms=duration,
-            confidence=0.88,
-        )
-
-    def on_tool_start(self, tool_name: str, tool_input: dict) -> None:
-        log_tool_call(
-            agent_name="unknown",
-            tool_name=tool_name,
-            arguments=tool_input,
-            result_summary="Tool invoked",
-            duration_ms=0,
-            success=True,
-        )
-
-    def on_tool_end(self, tool_name: str, tool_output: str) -> None:
-        print(f"  [Tool] ⚙️  {tool_name} → {str(tool_output)[:100]}...")
+def _log_event(template: str, **data) -> None:
+    """Emit a structured log event on the currently-active span. Safe if the
+    SDK is not installed or not initialised — swallows all errors.
+    """
+    try:
+        import neatlogs  # lazy import so module still imports without SDK
+        flat = {
+            k: v if isinstance(v, (str, int, float, bool))
+            else json.dumps(v, default=str)[:2000]
+            for k, v in data.items()
+        }
+        neatlogs.log(template, **flat)
+    except Exception:
+        pass
 
 
 def _emit_flight_traces(memory: SharedMemory, flight_result: str) -> None:
-    """Emit rich trace artifacts for flight search results."""
+    """Emit flight artifacts as structured log events on the WORKFLOW span."""
     try:
         data = json.loads(flight_result) if isinstance(flight_result, str) else flight_result
         options = data.get("options", [])
 
-        log_table_artifact(
-            agent_name="Flight Intelligence Specialist",
+        _log_event(
+            "[artifact] flight-comparison",
+            category="table",
+            agent="Flight Intelligence Specialist",
             label="Flight Comparison Table",
-            headers=["Airline", "Route", "Duration", "Stops", "Price (USD)", "On-Time", "Cabin"],
-            rows=[
-                [
-                    o.get("airline", ""),
-                    f"{o.get('departure', '')} → {o.get('arrival', '')}",
-                    o.get("duration", ""),
-                    str(o.get("stops", 0)),
-                    f"${o.get('price_usd', 0):,.0f}",
-                    o.get("on_time_rate", ""),
-                    o.get("cabin_class", ""),
-                ]
+            caption="Available flights SFO → DPS for June 2025",
+            option_count=len(options),
+            options=[
+                {
+                    "airline": o.get("airline", ""),
+                    "route": f"{o.get('departure', '')} → {o.get('arrival', '')}",
+                    "duration": o.get("duration", ""),
+                    "stops": o.get("stops", 0),
+                    "price_usd": o.get("price_usd", 0),
+                    "on_time_rate": o.get("on_time_rate", ""),
+                    "cabin_class": o.get("cabin_class", ""),
+                }
                 for o in options
             ],
-            caption="Available flights SFO → DPS for June 2025",
         )
 
         for opt in options[:2]:
             if opt.get("booking_url"):
-                log_url_artifact(
-                    agent_name="Flight Intelligence Specialist",
-                    label=f"Book: {opt['airline']}",
+                _log_event(
+                    "[artifact] flight-booking-url",
+                    category="url",
+                    agent="Flight Intelligence Specialist",
+                    airline=opt.get("airline", ""),
                     url=opt["booking_url"],
-                    title=f"{opt['airline']} — {opt.get('flight_number', '')}",
-                    description=f"{opt.get('duration', '')} | {opt.get('stops', 0)} stop | ${opt.get('price_usd', 0):,.0f}",
+                    flight_number=opt.get("flight_number", ""),
+                    price_usd=opt.get("price_usd", 0),
                 )
 
         if options:
             best = options[0]
-            log_markdown_artifact(
-                agent_name="Flight Intelligence Specialist",
+            _log_event(
+                "[artifact] flight-recommendation",
+                category="markdown",
+                agent="Flight Intelligence Specialist",
                 label="Recommended Flight",
-                content=f"""## ✈️ Recommended: {best['airline']}
-
-**Flight:** {best.get('flight_number', '')}
-**Departure:** {best.get('departure', '')}
-**Arrival:** {best.get('arrival', '')}
-**Duration:** {best.get('duration', '')}
-**Price:** ${best.get('price_usd', 0):,.0f} per person
-**On-Time Rate:** {best.get('on_time_rate', '')}
-
-> {best.get('notes', '')}
-
-**Why this flight?**
-{data.get('reasoning', 'Best overall value and experience.')}
-""",
+                airline=best.get("airline", ""),
+                flight_number=best.get("flight_number", ""),
+                price_usd=best.get("price_usd", 0),
+                duration=best.get("duration", ""),
+                on_time_rate=best.get("on_time_rate", ""),
+                reasoning=data.get("reasoning", "Best overall value and experience."),
             )
     except Exception as e:
         print(f"  [Trace] Could not emit flight artifacts: {e}")
 
 
 def _emit_hotel_traces(memory: SharedMemory, hotel_result: str) -> None:
-    """Emit rich trace artifacts for hotel search results."""
+    """Emit hotel artifacts as structured log events on the WORKFLOW span."""
     try:
         data = json.loads(hotel_result) if isinstance(hotel_result, str) else hotel_result
         options = data.get("options", [])
@@ -145,73 +104,73 @@ def _emit_hotel_traces(memory: SharedMemory, hotel_result: str) -> None:
         for hotel in options[:3]:
             image = hotel.get("image")
             if image and image.get("base64"):
-                log_image_artifact(
-                    agent_name="Luxury Hotel Scout",
+                _log_event(
+                    "[artifact] hotel-image",
+                    category="image",
+                    agent="Luxury Hotel Scout",
                     label=f"Hotel: {hotel['name']}",
                     image_url=image.get("imageUrl", ""),
-                    base64_data=image.get("base64", ""),
                     mime_type=image.get("mimeType", "image/jpeg"),
                     caption=f"{hotel['name']} — {hotel.get('neighborhood', '')}",
-                    source=image.get("source", ""),
+                    base64_size=len(image.get("base64", "")),
                 )
 
-        log_table_artifact(
-            agent_name="Luxury Hotel Scout",
+        _log_event(
+            "[artifact] hotel-comparison",
+            category="table",
+            agent="Luxury Hotel Scout",
             label="Hotel Comparison Table",
-            headers=["Hotel", "Location", "Price/Night", "Total (7N)", "Rating", "Vibe"],
-            rows=[
-                [
-                    h.get("name", ""),
-                    h.get("neighborhood", ""),
-                    f"${h.get('price_per_night_usd', 0):,.0f}",
-                    f"${h.get('total_price_usd', 0):,.0f}",
-                    f"⭐ {h.get('rating', 0)}/5",
-                    h.get("vibe", "")[:60] + "...",
-                ]
+            caption="Uluwatu luxury hotel options — June 2025",
+            option_count=len(options),
+            options=[
+                {
+                    "name": h.get("name", ""),
+                    "neighborhood": h.get("neighborhood", ""),
+                    "price_per_night_usd": h.get("price_per_night_usd", 0),
+                    "total_price_usd": h.get("total_price_usd", 0),
+                    "rating": h.get("rating", 0),
+                    "vibe": h.get("vibe", "")[:120],
+                }
                 for h in options
             ],
-            caption="Uluwatu luxury hotel options — June 2025",
         )
 
         for hotel in options[:2]:
             if hotel.get("booking_url"):
-                log_url_artifact(
-                    agent_name="Luxury Hotel Scout",
+                _log_event(
+                    "[artifact] hotel-booking-url",
+                    category="url",
+                    agent="Luxury Hotel Scout",
                     label=f"Book: {hotel['name']}",
                     url=hotel["booking_url"],
-                    title=hotel["name"],
-                    description=f"${hotel.get('price_per_night_usd', 0)}/night · {hotel.get('neighborhood', '')} · ⭐ {hotel.get('rating', 0)}",
+                    name=hotel["name"],
+                    price_per_night_usd=hotel.get("price_per_night_usd", 0),
+                    neighborhood=hotel.get("neighborhood", ""),
+                    rating=hotel.get("rating", 0),
                 )
 
         if options:
             top = options[0]
-            log_markdown_artifact(
-                agent_name="Luxury Hotel Scout",
+            _log_event(
+                "[artifact] hotel-recommendation",
+                category="markdown",
+                agent="Luxury Hotel Scout",
                 label="Top Hotel Pick",
-                content=f"""## 🏨 Recommended: {top['name']}
-
-**Location:** {top.get('location', '')}
-**Price:** ${top.get('price_per_night_usd', 0):,.0f}/night (${top.get('total_price_usd', 0):,.0f} total for 7 nights)
-**Rating:** ⭐ {top.get('rating', 0)}/5 ({top.get('review_count', 0):,} reviews)
-**To Beach:** {top.get('distance_to_beach', '')}
-**To Airport:** {top.get('distance_to_airport', '')}
-
-### The Vibe
-{top.get('vibe', '')}
-
-### Why You'll Love It
-{chr(10).join(f'• {h}' for h in top.get('highlights', []))}
-
-> **Why this hotel?**
-> {data.get('reasoning', '')}
-""",
+                name=top.get("name", ""),
+                location=top.get("location", ""),
+                price_per_night_usd=top.get("price_per_night_usd", 0),
+                total_price_usd=top.get("total_price_usd", 0),
+                rating=top.get("rating", 0),
+                vibe=top.get("vibe", ""),
+                highlights=top.get("highlights", []),
+                reasoning=data.get("reasoning", ""),
             )
     except Exception as e:
         print(f"  [Trace] Could not emit hotel artifacts: {e}")
 
 
 def _emit_places_traces(memory: SharedMemory, places_result: str) -> None:
-    """Emit rich trace artifacts for local places recommendations."""
+    """Emit local-places artifacts as structured log events on the WORKFLOW span."""
     try:
         data = json.loads(places_result) if isinstance(places_result, str) else places_result
 
@@ -220,116 +179,110 @@ def _emit_places_traces(memory: SharedMemory, places_result: str) -> None:
             for place in items[:2]:
                 image = place.get("image")
                 if image and image.get("base64"):
-                    log_image_artifact(
-                        agent_name="Local Culture & Vibes Curator",
+                    _log_event(
+                        "[artifact] place-image",
+                        category="image",
+                        sub_category=category,
+                        agent="Local Culture & Vibes Curator",
                         label=f"{category.replace('_', ' ').title()}: {place['name']}",
                         image_url=image.get("imageUrl", ""),
-                        base64_data=image.get("base64", ""),
                         mime_type=image.get("mimeType", "image/jpeg"),
                         caption=f"{place['name']} — {place.get('neighborhood', '')}",
-                        source=image.get("source", ""),
+                        base64_size=len(image.get("base64", "")),
                     )
 
         all_places = (
             data.get("cafes", []) + data.get("beach_clubs", []) +
             data.get("restaurants", []) + data.get("nightlife", [])
         )
-        log_table_artifact(
-            agent_name="Local Culture & Vibes Curator",
+        _log_event(
+            "[artifact] places-table",
+            category="table",
+            agent="Local Culture & Vibes Curator",
             label="Bali Local Hotspots",
-            headers=["Name", "Category", "Neighborhood", "Rating", "Price", "Vibe"],
-            rows=[
-                [
-                    p.get("name", ""),
-                    p.get("category", "").replace("_", " ").title(),
-                    p.get("neighborhood", ""),
-                    f"⭐ {p.get('rating', 0)}",
-                    p.get("price_range", ""),
-                    p.get("vibe", "")[:50] + "...",
-                ]
+            caption="Curated local hotspots — aesthetic, wellness, authentic",
+            place_count=len(all_places),
+            places=[
+                {
+                    "name": p.get("name", ""),
+                    "category": p.get("category", ""),
+                    "neighborhood": p.get("neighborhood", ""),
+                    "rating": p.get("rating", 0),
+                    "price_range": p.get("price_range", ""),
+                    "vibe": p.get("vibe", "")[:80],
+                }
                 for p in all_places
             ],
-            caption="Curated local hotspots — aesthetic, wellness, authentic",
         )
 
         for category in ["cafes", "beach_clubs", "restaurants", "nightlife"]:
             for place in data.get(category, [])[:1]:
                 if place.get("instagram_url"):
-                    log_url_artifact(
-                        agent_name="Local Culture & Vibes Curator",
-                        label=f"Instagram: {place['name']}",
+                    _log_event(
+                        "[artifact] place-instagram-url",
+                        category="url",
+                        agent="Local Culture & Vibes Curator",
+                        name=place["name"],
                         url=place["instagram_url"],
-                        title=f"@{place['name'].lower().replace(' ', '')}",
-                        description=place.get("vibe", "")[:100],
+                        vibe=place.get("vibe", "")[:100],
                     )
                 if place.get("google_maps_url"):
-                    log_url_artifact(
-                        agent_name="Local Culture & Vibes Curator",
-                        label=f"Map: {place['name']}",
+                    _log_event(
+                        "[artifact] place-map-url",
+                        category="url",
+                        agent="Local Culture & Vibes Curator",
+                        name=place["name"],
                         url=place["google_maps_url"],
-                        title=f"📍 {place['name']}",
-                        description=f"{place.get('neighborhood', '')} — {place.get('opening_hours', '')}",
+                        neighborhood=place.get("neighborhood", ""),
+                        opening_hours=place.get("opening_hours", ""),
                     )
     except Exception as e:
         print(f"  [Trace] Could not emit places artifacts: {e}")
 
 
 def _emit_budget_traces(memory: SharedMemory, budget_result: str) -> None:
-    """Emit rich trace artifacts for budget analysis."""
+    """Emit budget artifacts as structured log events on the WORKFLOW span."""
     try:
         data = json.loads(budget_result) if isinstance(budget_result, str) else budget_result
         summary = data.get("budget_summary", {})
 
-        log_table_artifact(
-            agent_name="Travel Finance Specialist",
+        _log_event(
+            "[artifact] budget-breakdown",
+            category="table",
+            agent="Travel Finance Specialist",
             label="Trip Budget Breakdown",
-            headers=["Category", "Estimated Cost", "% of Budget", "Notes"],
-            rows=[
-                [
-                    item.get("category", ""),
-                    f"${item.get('estimated_usd', 0):,.0f}",
-                    f"{item.get('percentage_of_budget', 0):.1f}%",
-                    item.get("notes", "")[:80],
-                ]
-                for item in data.get("breakdown", [])
-            ],
-            caption=f"7-day Bali trip budget — Total: ${summary.get('total_estimated_usd', 0):,.0f} (Budget: $4,000)",
+            caption=f"7-day Bali trip — Total: ${summary.get('total_estimated_usd', 0):,.0f} (Budget: $4,000)",
+            total_estimated_usd=summary.get("total_estimated_usd", 0),
+            stated_budget_usd=4000,
+            breakdown=data.get("breakdown", []),
         )
 
-        verdict = summary.get("verdict", "")
         variance = summary.get("variance_usd", 0)
-        log_markdown_artifact(
-            agent_name="Travel Finance Specialist",
+        _log_event(
+            "[artifact] budget-summary",
+            category="markdown",
+            agent="Travel Finance Specialist",
             label="Budget Summary",
-            content=f"""## 💰 Budget Analysis
-
-| | Amount |
-|---|---|
-| **Your Budget** | $4,000 |
-| **Estimated Total** | ${summary.get('total_estimated_usd', 0):,.0f} |
-| **Variance** | {"+" if variance > 0 else ""}${variance:,.0f} ({summary.get('variance_pct', 0):.1f}%) |
-| **Verdict** | {"⚠️" if variance > 0 else "✅"} {verdict} |
-
-### 💡 Top Savings Tips
-{chr(10).join(f'• {tip}' for tip in data.get('saving_tips', [])[:3])}
-
-### ✨ Worth Splurging On
-{chr(10).join(f'• {item}' for item in data.get('splurge_recommendations', [])[:2])}
-
-> {data.get('currency_note', '')}
-""",
+            stated_budget_usd=4000,
+            total_estimated_usd=summary.get("total_estimated_usd", 0),
+            variance_usd=variance,
+            variance_pct=summary.get("variance_pct", 0),
+            verdict=summary.get("verdict", ""),
+            saving_tips=data.get("saving_tips", [])[:3],
+            splurge_recommendations=data.get("splurge_recommendations", [])[:2],
         )
     except Exception as e:
         print(f"  [Trace] Could not emit budget artifacts: {e}")
 
 
 def _emit_detection_traces(detections: list[dict]) -> None:
-    """Emit all trust detections to NeatLogs."""
+    """Emit detections as structured log events on the WORKFLOW span."""
     for det in detections:
-        log_detection(
-            agent_name="Trust & Quality Analyst",
-            detection_id=det.get("id", ""),
-            detection_type=det.get("type", "warning"),
+        _log_event(
+            "[detection] [{severity}] {title}",
+            agent="Trust & Quality Analyst",
+            id=det.get("id", ""),
+            type=det.get("type", "warning"),
             severity=det.get("severity", "medium"),
             title=det.get("title", ""),
             message=det.get("message", ""),
@@ -563,8 +516,18 @@ class TravelConcierge:
             "total_budget_usd": trip_request.get("total_budget_usd", 4000),
             "avoid": trip_request.get("avoid", []),
         })
-        log_memory_update("Orchestrator", "userProfile", f"Bali 7-day trip from SFO, budget ${trip_request.get('total_budget_usd', 4000):,}")
-        log_memory_update("Orchestrator", "preferences", f"Vibe: {', '.join(trip_request.get('vibe_keywords', []))}")
+        _log_event(
+            "[memory] Orchestrator/userProfile",
+            agent="Orchestrator",
+            key="userProfile",
+            summary=f"Bali 7-day trip from SFO, budget ${trip_request.get('total_budget_usd', 4000):,}",
+        )
+        _log_event(
+            "[memory] Orchestrator/preferences",
+            agent="Orchestrator",
+            key="preferences",
+            summary=f"Vibe: {', '.join(trip_request.get('vibe_keywords', []))}",
+        )
 
         trip_context = {
             "user_request": trip_request.get("raw_request", ""),
@@ -589,7 +552,8 @@ class TravelConcierge:
             trip_context,
         )
 
-        log_orchestration_decision(
+        _log_event(
+            "[orchestrator] Sequential crew execution initiated",
             decision="Sequential crew execution initiated",
             rationale="Running agents in dependency order: Flights → Hotels → Local Vibes → Itinerary → Budget → Trust → Synthesis",
             next_agents=[t.agent.role for t in tasks],
@@ -624,7 +588,11 @@ class TravelConcierge:
         return str(result)
 
     def _emit_post_execution_traces(self) -> None:
-        """Emit the rich trace artifacts to NeatLogs after execution."""
+        """Emit the rich demo artifacts to NeatLogs as structured log events on
+        the active WORKFLOW span. These are static demo artifacts, not real
+        agent work, so they don't get their own spans — they become searchable
+        log events attached to the current trace instead.
+        """
         print("\n  📊  Emitting rich trace artifacts to NeatLogs...")
 
         from tools.flight_tools import search_flights
@@ -632,52 +600,73 @@ class TravelConcierge:
         from tools.places_tools import search_places
         from tools.budget_tools import estimate_budget
 
-        with agent_trace("Flight Intelligence Specialist", "trace_emission", "Emit flight artifacts", "gemini-2.5-flash"):
-            flight_raw = search_flights.run({
-                "origin": "SFO", "destination": "DPS",
-                "departure_date": "June 1, 2025", "return_date": "June 8, 2025",
-            })
-            _emit_flight_traces(self.memory, flight_raw)
-            log_memory_update("Flight Intelligence Specialist", "selectedFlights", "Singapore Airlines SQ35 recommended — $1,280 — best value+comfort")
+        flight_raw = search_flights.func(
+            origin="SFO", destination="DPS",
+            departure_date="June 1, 2025", return_date="June 8, 2025",
+        )
+        _emit_flight_traces(self.memory, flight_raw)
+        _log_event(
+            "[memory] Flight Intelligence Specialist/selectedFlights",
+            agent="Flight Intelligence Specialist",
+            key="selectedFlights",
+            summary="Singapore Airlines SQ35 recommended — $1,280 — best value+comfort",
+        )
 
-        with agent_trace("Luxury Hotel Scout", "trace_emission", "Emit hotel artifacts", "gemini-2.5-pro"):
-            hotel_raw = search_hotels.run({
-                "destination": "Uluwatu, Bali", "check_in": "June 1, 2025",
-                "check_out": "June 8, 2025",
-                "vibe_keywords": "aesthetic, wellness, clifftop, adults-only",
-                "budget_per_night_usd": 600,
-            })
-            _emit_hotel_traces(self.memory, hotel_raw)
-            log_memory_update("Luxury Hotel Scout", "selectedHotel", "Alila Villas Uluwatu — $650/night — best vibe+location match")
+        hotel_raw = search_hotels.func(
+            destination="Uluwatu, Bali", check_in="June 1, 2025",
+            check_out="June 8, 2025",
+            vibe_keywords="aesthetic, wellness, clifftop, adults-only",
+            budget_per_night_usd=600,
+        )
+        _emit_hotel_traces(self.memory, hotel_raw)
+        _log_event(
+            "[memory] Luxury Hotel Scout/selectedHotel",
+            agent="Luxury Hotel Scout",
+            key="selectedHotel",
+            summary="Alila Villas Uluwatu — $650/night — best vibe+location match",
+        )
 
-        with agent_trace("Local Culture & Vibes Curator", "trace_emission", "Emit places artifacts", "gemini-2.5-flash"):
-            places_raw = search_places.run({
-                "destination": "Bali",
-                "categories": "cafes,restaurants,beach_clubs,gyms,nightlife",
-                "vibe_keywords": "aesthetic, wellness, authentic, not touristy",
-            })
-            _emit_places_traces(self.memory, places_raw)
-            log_memory_update("Local Culture & Vibes Curator", "shortlistedActivities", "18 places curated across 5 categories")
+        places_raw = search_places.func(
+            destination="Bali",
+            categories="cafes,restaurants,beach_clubs,gyms,nightlife",
+            vibe_keywords="aesthetic, wellness, authentic, not touristy",
+        )
+        _emit_places_traces(self.memory, places_raw)
+        _log_event(
+            "[memory] Local Culture & Vibes Curator/shortlistedActivities",
+            agent="Local Culture & Vibes Curator",
+            key="shortlistedActivities",
+            summary="18 places curated across 5 categories",
+        )
 
-        with agent_trace("Travel Finance Specialist", "trace_emission", "Emit budget artifacts", "gemini-2.5-flash"):
-            budget_raw = estimate_budget.run({
-                "destination": "Bali", "duration_days": 7,
-                "hotel_name": "Alila Villas Uluwatu",
-                "hotel_price_per_night": 650,
-                "flight_price": 1280,
-                "travel_style": "luxury wellness",
-            })
-            _emit_budget_traces(self.memory, budget_raw)
-            log_memory_update("Travel Finance Specialist", "budgetState", "Total estimated: $5,540 — 38.5% over $4k budget")
+        budget_raw = estimate_budget.func(
+            destination="Bali", duration_days=7,
+            hotel_name="Alila Villas Uluwatu",
+            hotel_price_per_night=650,
+            flight_price=1280,
+            travel_style="luxury wellness",
+        )
+        _emit_budget_traces(self.memory, budget_raw)
+        _log_event(
+            "[memory] Travel Finance Specialist/budgetState",
+            agent="Travel Finance Specialist",
+            key="budgetState",
+            summary="Total estimated: $5,540 — 38.5% over $4k budget",
+        )
 
-        with agent_trace("Trust & Quality Analyst", "trace_emission", "Emit detection artifacts", "gemini-2.5-pro"):
-            _emit_detection_traces(HARDCODED_DETECTIONS)
-            for det in HARDCODED_DETECTIONS:
-                self.memory.add_detection(det)
-            log_memory_update("Trust & Quality Analyst", "detections", f"{len(HARDCODED_DETECTIONS)} detections: 1 high, 2 medium, 1 low, 1 positive")
+        _emit_detection_traces(HARDCODED_DETECTIONS)
+        for det in HARDCODED_DETECTIONS:
+            self.memory.add_detection(det)
+        _log_event(
+            "[memory] Trust & Quality Analyst/detections",
+            agent="Trust & Quality Analyst",
+            key="detections",
+            summary=f"{len(HARDCODED_DETECTIONS)} detections: 1 high, 2 medium, 1 low, 1 positive",
+        )
 
-        log_reasoning_step(
-            agent_name="Lead Travel Intelligence Orchestrator",
+        _log_event(
+            "[reasoning] Lead Travel Intelligence Orchestrator/synthesis",
+            agent="Lead Travel Intelligence Orchestrator",
             step="synthesis",
             thought=(
                 "All specialist agents have completed their analysis. Key tension: Alila Villas is "
