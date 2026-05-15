@@ -261,10 +261,10 @@ def run_demo():
             body=caption,
             image_url=url,
             mime_type="image/jpeg",
-            # Base64 payloads can get large — truncate heavily on the span
+            image_base64=b64,
             base64_size=len(b64),
         )
-        print(f"  🖼  {caption}")
+        print(f"  🖼  {caption}  (base64 {len(b64)//1024} KB)")
 
     _emit_artifact(
         label="Hotel Comparison Table",

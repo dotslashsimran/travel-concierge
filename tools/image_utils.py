@@ -68,12 +68,13 @@ BALI_IMAGES = {
 
 
 def fetch_image_as_base64(url: str, timeout: int = 10) -> Optional[str]:
-    """Fetch an image from a URL and return as base64 string."""
+    """Fetch an image from a URL and return as a `data:image/jpeg;base64,...` URI."""
     try:
         with httpx.Client(timeout=timeout, follow_redirects=True) as client:
             resp = client.get(url)
             resp.raise_for_status()
-            return base64.b64encode(resp.content).decode("utf-8")
+            encoded = base64.b64encode(resp.content).decode("utf-8")
+            return f"data:image/jpeg;base64,{encoded}"
     except Exception:
         return None
 
