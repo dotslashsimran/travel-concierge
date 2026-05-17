@@ -4,3 +4,8 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+
+# Local artefacts / debug dumps (not for git)
+.python-version
+*.log
+spans_raw_optimized.log

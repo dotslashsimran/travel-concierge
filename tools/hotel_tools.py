@@ -85,8 +85,7 @@ def search_hotels(destination: str, check_in: str, check_out: str, vibe_keywords
     for i, hotel in enumerate(MOCK_HOTELS):
         h = hotel.model_copy()
         img = build_image_artifact(image_keys[i % len(image_keys)])
-        # Strip base64 from tool output — traces emit it separately to NeatLogs
-        h.image = img.model_copy(update={"base64": "[base64_omitted_see_neatlogs_trace]"})
+        h.image = img
         hotels_with_images.append(h)
 
     result = HotelSearchOutput(

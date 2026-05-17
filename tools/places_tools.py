@@ -221,10 +221,9 @@ def search_places(destination: str, categories: str, vibe_keywords: str) -> str:
     """Search for places (cafes, restaurants, beach clubs, gyms, nightlife) matching vibe preferences."""
     time.sleep(0.4)
 
-    _stub = {"base64": "[base64_omitted_see_neatlogs_trace]"}
-    all_cafes = [p.model_copy(update={"image": build_image_artifact("cafe_bali").model_copy(update=_stub)}) for p in MOCK_CAFES]
-    all_beach_clubs = [p.model_copy(update={"image": build_image_artifact("beach_club").model_copy(update=_stub)}) for p in MOCK_BEACH_CLUBS]
-    all_restaurants = [p.model_copy(update={"image": build_image_artifact("warung_food").model_copy(update=_stub)}) for p in MOCK_RESTAURANTS]
+    all_cafes = [p.model_copy(update={"image": build_image_artifact("cafe_bali")}) for p in MOCK_CAFES]
+    all_beach_clubs = [p.model_copy(update={"image": build_image_artifact("beach_club")}) for p in MOCK_BEACH_CLUBS]
+    all_restaurants = [p.model_copy(update={"image": build_image_artifact("warung_food")}) for p in MOCK_RESTAURANTS]
     all_gyms = MOCK_GYMS
     all_nightlife = MOCK_NIGHTLIFE
 

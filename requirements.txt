@@ -1,11 +1,16 @@
-neatlogs[crewai,google-genai,litellm]==1.2.7
-crewai>=0.80.0
-crewai-tools>=0.14.0
-litellm>=1.50.0
-google-generativeai>=0.8.0
-pydantic>=2.0.0
-python-dotenv>=1.0.0
-httpx>=0.27.0
-aiohttp>=3.9.0
-Pillow>=10.0.0
-requests>=2.31.0
+# Install with pip (not uv):
+#   pip install -r requirements.txt
+#
+# crewai pins opentelemetry-api<1.35 but neatlogs pulls in
+# opentelemetry-instrumentation-openai which declares >=1.38. uv refuses
+# this as unsatisfiable. pip installs both and it works in practice because
+# the actual code paths are compatible with 1.34.x.
+
+neatlogs[crewai,google-genai]==1.3.1
+# -e ../neatlogs[crewai,google-genai]
+crewai==1.14.1
+openinference-instrumentation-crewai==1.1.2
+google-genai
+httpx
+python-dotenv
+rich
